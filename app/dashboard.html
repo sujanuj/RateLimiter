@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rate Limiter Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #f5f5f3;
+    color: #1a1a18;
+    min-height: 100vh;
+    padding: 2rem 1.5rem;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  h1 {
+    font-size: 20px;
+    font-weight: 500;
+    color: #1a1a18;
+  }
+
+  .subtitle {
+    font-size: 13px;
+    color: #888780;
+  }
+
+  .controls {
+    background: #fff;
+    border: 0.5px solid rgba(0,0,0,0.12);
+    border-radius: 12px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .controls label {
+    font-size: 13px;
+    color: #888780;
+    white-space: nowrap;
+  }
+
+  .controls input[type="text"] {
+    border: 0.5px solid rgba(0,0,0,0.2);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 14px;
+    font-family: monospace;
+    width: 160px;
+    background: #fff;
+    color: #1a1a18;
+    outline: none;
+  }
+
+  .controls input[type="text"]:focus {
+    border-color: rgba(0,0,0,0.4);
+    box-shadow: 0 0 0 2px rgba(0,0,0,0.06);
+  }
+
+  .controls input[type="number"] {
+    border: 0.5px solid rgba(0,0,0,0.2);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 14px;
+    width: 70px;
+    background: #fff;
+    color: #1a1a18;
+    outline: none;
+  }
+
+  .sep { color: #d3d1c7; font-size: 18px; }
+
+  .algo-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 1.5rem;
+  }
+
+  .algo-card {
+    background: #fff;
+    border: 0.5px solid rgba(0,0,0,0.12);
+    border-radius: 12px;
+    padding: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .algo-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .algo-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: #5f5e5a;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .algo-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-weight: 500;
+  }
+
+  .badge-fixed   { background: #e6f1fb; color: #0c447c; }
+  .badge-sliding { background: #e1f5ee; color: #085041; }
+  .badge-token   { background: #eeedfe; color: #3c3489; }
+
+  .token-display {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .token-count {
+    font-size: 36px;
+    font-weight: 500;
+    line-height: 1;
+  }
+
+  .token-limit {
+    font-size: 14px;
+    color: #888780;
+  }
+
+  .progress-bar {
+    height: 6px;
+    background: #f1efe8;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .progress-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+
+  .fill-fixed   { background: #378add; }
+  .fill-sliding { background: #1d9e75; }
+  .fill-token   { background: #7f77dd; }
+  .fill-empty   { background: #f09595; }
+
+  .algo-meta {
+    font-size: 12px;
+    color: #888780;
+    line-height: 1.5;
+  }
+
+  .fire-btn {
+    width: 100%;
+    padding: 8px;
+    border: 0.5px solid rgba(0,0,0,0.15);
+    border-radius: 8px;
+    background: transparent;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+    color: #1a1a18;
+  }
+
+  .fire-btn:hover  { background: #f1efe8; }
+  .fire-btn:active { transform: scale(0.98); }
+
+  .fire-btn.allowed  { border-color: rgba(29,158,117,0.4); color: #0f6e56; }
+  .fire-btn.rejected { border-color: rgba(226,75,74,0.4);  color: #a32d2d; }
+
+  .burst-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .burst-btn {
+    flex: 1;
+    padding: 6px;
+    border: 0.5px solid rgba(0,0,0,0.12);
+    border-radius: 8px;
+    background: transparent;
+    font-size: 12px;
+    cursor: pointer;
+    color: #5f5e5a;
+    transition: background 0.15s;
+  }
+
+  .burst-btn:hover { background: #f1efe8; }
+
+  .log-section {
+    background: #fff;
+    border: 0.5px solid rgba(0,0,0,0.12);
+    border-radius: 12px;
+    padding: 1.25rem;
+  }
+
+  .log-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .log-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: #5f5e5a;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .clear-btn {
+    font-size: 12px;
+    color: #888780;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .clear-btn:hover { background: #f1efe8; color: #5f5e5a; }
+
+  .log-empty {
+    font-size: 13px;
+    color: #b4b2a9;
+    text-align: center;
+    padding: 2rem 0;
+  }
+
+  .log-entry {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 0.5px solid rgba(0,0,0,0.06);
+    font-size: 13px;
+    animation: fadein 0.2s ease;
+  }
+
+  .log-entry:last-child { border-bottom: none; }
+
+  @keyframes fadein { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; } }
+
+  .log-status {
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+
+  .log-algo {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 5px;
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+
+  .log-identifier { color: #5f5e5a; font-family: monospace; font-size: 12px; }
+  .log-detail     { flex: 1; color: #888780; font-size: 12px; }
+  .log-time       { color: #b4b2a9; font-size: 11px; flex-shrink: 0; }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+  }
+
+  .dot-ok  { background: #1d9e75; }
+  .dot-err { background: #e24b4a; }
+
+  @media (prefers-color-scheme: dark) {
+    body { background: #1a1a18; color: #e8e6df; }
+    .algo-card, .controls, .log-section { background: #2c2c2a; border-color: rgba(255,255,255,0.1); }
+    .controls input[type="text"], .controls input[type="number"] {
+      background: #1a1a18; color: #e8e6df; border-color: rgba(255,255,255,0.15);
+    }
+    .fire-btn, .burst-btn { color: #e8e6df; border-color: rgba(255,255,255,0.12); }
+    .fire-btn:hover, .burst-btn:hover { background: #444441; }
+    .progress-bar { background: #444441; }
+    h1 { color: #e8e6df; }
+    .badge-fixed   { background: #0c447c; color: #b5d4f4; }
+    .badge-sliding { background: #085041; color: #9fe1cb; }
+    .badge-token   { background: #3c3489; color: #cecbf6; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Distributed Rate Limiter</h1>
+  <span class="subtitle">live dashboard &mdash; 3 algorithms, real Redis state</span>
+</header>
+
+<div class="controls">
+  <label>Identifier</label>
+  <input type="text" id="identifier" value="user:42" />
+  <span class="sep">|</span>
+  <label>Limit</label>
+  <input type="number" id="limit" value="10" min="1" max="100" />
+  <span class="sep">|</span>
+  <label>Window (s)</label>
+  <input type="number" id="window" value="60" min="5" max="300" />
+  <span class="sep">|</span>
+  <label>Refill rate</label>
+  <input type="number" id="refill" value="1" min="0.1" max="10" step="0.1" />
+  <span style="font-size:13px;color:#888780;">/s (token bucket)</span>
+</div>
+
+<div class="algo-grid">
+
+  <div class="algo-card" id="card-fixed">
+    <div class="algo-header">
+      <span class="algo-name">Fixed Window</span>
+      <span class="algo-badge badge-fixed">O(1)</span>
+    </div>
+    <div class="token-display">
+      <span class="token-count" id="fw-remaining">—</span>
+      <span class="token-limit" id="fw-limit">/ —</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill fill-fixed" id="fw-bar" style="width:0%"></div>
+    </div>
+    <div class="algo-meta" id="fw-meta">resets in — s &nbsp;·&nbsp; string + TTL</div>
+    <button class="fire-btn" id="fw-btn" onclick="fireRequest('fixed')">Fire request</button>
+    <div class="burst-row">
+      <button class="burst-btn" onclick="burstRequest('fixed', 5)">burst ×5</button>
+      <button class="burst-btn" onclick="burstRequest('fixed', 10)">burst ×10</button>
+    </div>
+  </div>
+
+  <div class="algo-card" id="card-sliding">
+    <div class="algo-header">
+      <span class="algo-name">Sliding Window</span>
+      <span class="algo-badge badge-sliding">O(N)</span>
+    </div>
+    <div class="token-display">
+      <span class="token-count" id="sw-remaining">—</span>
+      <span class="token-limit" id="sw-limit">/ —</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill fill-sliding" id="sw-bar" style="width:0%"></div>
+    </div>
+    <div class="algo-meta" id="sw-meta">rolling window &nbsp;·&nbsp; sorted set (ZSET)</div>
+    <button class="fire-btn" id="sw-btn" onclick="fireRequest('sliding')">Fire request</button>
+    <div class="burst-row">
+      <button class="burst-btn" onclick="burstRequest('sliding', 5)">burst ×5</button>
+      <button class="burst-btn" onclick="burstRequest('sliding', 10)">burst ×10</button>
+    </div>
+  </div>
+
+  <div class="algo-card" id="card-token">
+    <div class="algo-header">
+      <span class="algo-name">Token Bucket</span>
+      <span class="algo-badge badge-token">O(1)</span>
+    </div>
+    <div class="token-display">
+      <span class="token-count" id="tb-remaining">—</span>
+      <span class="token-limit" id="tb-limit">/ —</span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill fill-token" id="tb-bar" style="width:0%"></div>
+    </div>
+    <div class="algo-meta" id="tb-meta">refills — /s &nbsp;·&nbsp; hash (HMAP) + lazy refill</div>
+    <button class="fire-btn" id="tb-btn" onclick="fireRequest('token')">Fire request</button>
+    <div class="burst-row">
+      <button class="burst-btn" onclick="burstRequest('token', 5)">burst ×5</button>
+      <button class="burst-btn" onclick="burstRequest('token', 10)">burst ×10</button>
+    </div>
+  </div>
+
+</div>
+
+<div class="log-section">
+  <div class="log-header">
+    <span class="log-title">Request log</span>
+    <button class="clear-btn" onclick="clearLog()">clear</button>
+  </div>
+  <div id="log-body">
+    <div class="log-empty">Fire a request above to see live results</div>
+  </div>
+</div>
+
+<script>
+const ALGO_MAP = {
+  fixed:   { endpoint: '/rate-limit/fixed-window',   status: '/rate-limit/fixed-window/status',   label: 'Fixed Window',   badge: 'badge-fixed',   bar: 'fill-fixed',   rem: 'fw-remaining', lim: 'fw-limit', barId: 'fw-bar', metaId: 'fw-meta', btnId: 'fw-btn' },
+  sliding: { endpoint: '/rate-limit/sliding-window', status: '/rate-limit/sliding-window/status', label: 'Sliding Window', badge: 'badge-sliding', bar: 'fill-sliding', rem: 'sw-remaining', lim: 'sw-limit', barId: 'sw-bar', metaId: 'sw-meta', btnId: 'sw-btn' },
+  token:   { endpoint: '/rate-limit/token-bucket',   status: '/rate-limit/token-bucket/status',   label: 'Token Bucket',   badge: 'badge-token',   bar: 'fill-token',   rem: 'tb-remaining', lim: 'tb-limit', barId: 'tb-bar', metaId: 'tb-meta', btnId: 'tb-btn' },
+};
+
+function getParams() {
+  return {
+    identifier: document.getElementById('identifier').value.trim() || 'user:42',
+    limit:  parseInt(document.getElementById('limit').value)  || 10,
+    window: parseInt(document.getElementById('window').value) || 60,
+    refill: parseFloat(document.getElementById('refill').value) || 1.0,
+  };
+}
+
+function updateCard(algo, data) {
+  const cfg = ALGO_MAP[algo];
+  const remaining = data.remaining;
+  const limit     = data.limit;
+  const pct       = limit > 0 ? Math.round((remaining / limit) * 100) : 0;
+  const isEmpty   = remaining === 0;
+
+  document.getElementById(cfg.rem).textContent = remaining;
+  document.getElementById(cfg.lim).textContent = '/ ' + limit;
+
+  const bar = document.getElementById(cfg.barId);
+  bar.style.width = pct + '%';
+  bar.className = 'progress-fill ' + (isEmpty ? 'fill-empty' : cfg.bar);
+
+  const meta = document.getElementById(cfg.metaId);
+  if (algo === 'fixed') {
+    meta.textContent = 'resets in ' + data.reset_after_seconds + 's · string + TTL';
+  } else if (algo === 'sliding') {
+    meta.textContent = 'rolling ' + getParams().window + 's window · sorted set (ZSET)';
+  } else {
+    const p = getParams();
+    meta.textContent = 'refills ' + p.refill + '/s · hash (HMAP) + lazy refill';
+  }
+}
+
+function addLog(algo, allowed, data, identifier) {
+  const cfg  = ALGO_MAP[algo];
+  const body = document.getElementById('log-body');
+
+  const empty = body.querySelector('.log-empty');
+  if (empty) empty.remove();
+
+  const detail = allowed
+    ? 'remaining ' + data.remaining + ' · reset ' + data.reset_after_seconds + 's'
+    : 'REJECTED · retry in ' + data.reset_after_seconds + 's';
+
+  const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML =
+    '<span class="log-status">' + (allowed ? '✅' : '❌') + '</span>' +
+    '<span class="log-algo ' + cfg.badge + '">' + cfg.label + '</span>' +
+    '<span class="log-identifier">' + identifier + '</span>' +
+    '<span class="log-detail">' + detail + '</span>' +
+    '<span class="log-time">' + now + '</span>';
+
+  body.insertBefore(entry, body.firstChild);
+
+  while (body.children.length > 40) {
+    body.removeChild(body.lastChild);
+  }
+}
+
+async function fireRequest(algo) {
+  const cfg = ALGO_MAP[algo];
+  const p   = getParams();
+  const btn = document.getElementById(cfg.btnId);
+
+  let url;
+  if (algo === 'token') {
+    url = cfg.endpoint + '?identifier=' + encodeURIComponent(p.identifier) + '&capacity=' + p.limit + '&refill_rate=' + p.refill;
+  } else {
+    url = cfg.endpoint + '?identifier=' + encodeURIComponent(p.identifier) + '&limit=' + p.limit + '&window_seconds=' + p.window;
+  }
+
+  btn.textContent = '...';
+  btn.disabled = true;
+
+  try {
+    const res  = await fetch(url, { method: 'POST' });
+    const json = await res.json();
+
+    const allowed = res.status === 200;
+    const data    = allowed ? json : json.detail;
+
+    updateCard(algo, {
+      remaining: data.remaining ?? 0,
+      limit: data.limit ?? p.limit,
+      reset_after_seconds: data.reset_after_seconds ?? data.retry_after_seconds ?? 0,
+    });
+
+    addLog(algo, allowed, {
+      remaining: data.remaining ?? 0,
+      reset_after_seconds: data.reset_after_seconds ?? data.retry_after_seconds ?? 0,
+    }, p.identifier);
+
+    btn.className = 'fire-btn ' + (allowed ? 'allowed' : 'rejected');
+    btn.textContent = allowed ? '✓ allowed' : '✗ rejected';
+    setTimeout(() => {
+      btn.textContent = 'Fire request';
+      btn.className = 'fire-btn';
+      btn.disabled = false;
+    }, 800);
+
+  } catch(e) {
+    btn.textContent = 'error';
+    btn.disabled = false;
+  }
+}
+
+async function burstRequest(algo, count) {
+  for (let i = 0; i < count; i++) {
+    await fireRequest(algo);
+    await new Promise(r => setTimeout(r, 80));
+  }
+}
+
+function clearLog() {
+  document.getElementById('log-body').innerHTML = '<div class="log-empty">Fire a request above to see live results</div>';
+}
+
+async function refreshStatus() {
+  const p = getParams();
+  for (const [algo, cfg] of Object.entries(ALGO_MAP)) {
+    let url;
+    if (algo === 'token') {
+      url = cfg.status + '?identifier=' + encodeURIComponent(p.identifier) + '&capacity=' + p.limit + '&refill_rate=' + p.refill;
+    } else {
+      url = cfg.status + '?identifier=' + encodeURIComponent(p.identifier) + '&limit=' + p.limit + '&window_seconds=' + p.window;
+    }
+    try {
+      const res  = await fetch(url);
+      const data = await res.json();
+      updateCard(algo, data);
+    } catch(e) {}
+  }
+}
+
+refreshStatus();
+setInterval(refreshStatus, 2000);
+</script>
+</body>
+</html>

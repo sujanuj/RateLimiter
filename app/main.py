@@ -25,10 +25,12 @@ THE THREE ENDPOINTS:
 """
 
 import os
+from pathlib import Path
 import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 
 from app.redis_client import get_redis, close_redis
@@ -183,3 +185,36 @@ async def reset_identifier(identifier: str):
     if keys:
         await redis.delete(*keys)
     return {"deleted_keys": len(keys), "identifier": identifier}
+
+@app.get("/dashboard", response_class=HTMLResponse, tags=["System"])
+async def dashboard():
+    html_path = Path(__file__).parent / "dashboard.html"
+    return HTMLResponse(content=html_path.read_text())
+
+@app.get("/rate-limit/sliding-window/status", response_model=RateLimitResult, tags=["Sliding Window Log"])
+async def sliding_window_status(
+    identifier: str = Query(...),
+    limit: int = Query(10, ge=1),
+    window_seconds: int = Query(60, ge=1),
+):
+    redis = await get_redis()
+    key = f"ratelimit:sliding:{identifier}"
+    now = time.time()
+    window_start = now - window_seconds
+    count = int(await redis.zcount(key, window_start, "+inf"))
+    return RateLimitResult(allowed=count < limit, limit=limit, remaining=max(0, limit - count), reset_after_seconds=window_seconds, algorithm="sliding_window_log", key=key)
+
+@app.get("/rate-limit/token-bucket/status", response_model=RateLimitResult, tags=["Token Bucket"])
+async def token_bucket_status(
+    identifier: str = Query(...),
+    capacity: int = Query(10, ge=1),
+    refill_rate: float = Query(1.0, gt=0),
+):
+    redis = await get_redis()
+    key = f"ratelimit:token:{identifier}"
+    data = await redis.hmget(key, "tokens", "last")
+    stored = float(data[0]) if data[0] else float(capacity)
+    last = float(data[1]) if data[1] else time.time()
+    current = min(capacity, stored + (time.time() - last) * refill_rate)
+    remaining = int(current)
+    return RateLimitResult(allowed=current >= 1, limit=capacity, remaining=remaining, reset_after_seconds=0 if current >= 1 else int(1.0 / refill_rate) + 1, algorithm="token_bucket", key=key)
