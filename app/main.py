@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 
 from app.redis_client import get_redis, close_redis
 from app.algorithms.fixed_window import FixedWindowCounter
+from app.middleware.rate_limit import TokenBucketMiddleware
 from app.algorithms.sliding_window_log import SlidingWindowLog
 from app.algorithms.token_bucket import TokenBucket
 from app.models.rate_limit import RateLimitResult
@@ -64,6 +65,7 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.add_middleware(TokenBucketMiddleware)
 
 # Read defaults from .env so we're not hardcoding numbers in the routes
 _DEFAULT_LIMIT  = int(os.getenv("DEFAULT_LIMIT", 10))
