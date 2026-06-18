@@ -35,6 +35,8 @@ from dotenv import load_dotenv
 
 from app.redis_client import get_redis, close_redis
 from app.algorithms.fixed_window import FixedWindowCounter
+from app.algorithms.sliding_window_log import SlidingWindowLog
+from app.algorithms.token_bucket import TokenBucket
 from app.models.rate_limit import RateLimitResult
 
 load_dotenv()
@@ -218,3 +220,29 @@ async def token_bucket_status(
     current = min(capacity, stored + (time.time() - last) * refill_rate)
     remaining = int(current)
     return RateLimitResult(allowed=current >= 1, limit=capacity, remaining=remaining, reset_after_seconds=0 if current >= 1 else int(1.0 / refill_rate) + 1, algorithm="token_bucket", key=key)
+
+@app.post("/rate-limit/token-bucket", response_model=RateLimitResult, tags=["Token Bucket"])
+async def check_token_bucket(
+    identifier: str = Query(...),
+    capacity: int = Query(10, ge=1),
+    refill_rate: float = Query(1.0, gt=0),
+):
+    redis = await get_redis()
+    bucket = TokenBucket(redis)
+    result = await bucket.is_allowed(identifier, capacity=capacity, refill_rate=refill_rate)
+    if not result.allowed:
+        raise HTTPException(status_code=429, detail={"error": "Rate limit exceeded", "remaining": result.remaining, "limit": result.limit, "reset_after_seconds": result.reset_after_seconds, "algorithm": result.algorithm})
+    return result
+
+@app.post("/rate-limit/sliding-window", response_model=RateLimitResult, tags=["Sliding Window Log"])
+async def check_sliding_window(
+    identifier: str = Query(...),
+    limit: int = Query(10, ge=1),
+    window_seconds: int = Query(60, ge=1),
+):
+    redis = await get_redis()
+    log = SlidingWindowLog(redis)
+    result = await log.is_allowed(identifier, limit=limit, window_seconds=window_seconds)
+    if not result.allowed:
+        raise HTTPException(status_code=429, detail={"error": "Rate limit exceeded", "remaining": result.remaining, "limit": result.limit, "reset_after_seconds": result.reset_after_seconds, "algorithm": result.algorithm})
+    return result
