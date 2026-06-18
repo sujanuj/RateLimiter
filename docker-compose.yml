@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7.2-alpine        # alpine = minimal Linux base, keeps image small
+    container_name: ratelimiter-redis
+    ports:
+      - "6379:6379"                # host_port:container_port — app talks to localhost:6379
+    volumes:
+      - redis_data:/data           # persist counter data across container restarts
+    command: redis-server --appendonly yes   # write-ahead log so data survives crashes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis_data:
