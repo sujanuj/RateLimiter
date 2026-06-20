@@ -1,250 +1,93 @@
-# SER594-Team4-SkillSync
-SkillSync: A Multi-Agent Platform for Learning and Project Partner Recommendation
+# Distributed Rate Limiter
 
-SkillSync was developed because it is very annoying trying to find someone who can join you as your study partner or collaborate with you on your project. Either way, both of them would try posting on a Discord or on LinkedIn and still not find people. Therefore, an effective solution had to be implemented.
+A distributed rate limiter built with FastAPI and Redis, implementing three different rate limiting algorithms from scratch. I built this as a portfolio project while studying for my MS in Software Engineering at Arizona State University, mainly to get hands-on practice with distributed systems concepts that come up a lot in backend interviews: shared state across servers, race conditions, and atomic operations.
 
-How we did it: when users enter their required details regarding their skills and goals, we generate a semantic vector for them using the text that they have entered and store it in DB. The same process is repeated when a user enters his query, and a vector is generated for it, and the most similar vectors are pulled from the database. Recommendations are made only on the basis of semantic similarity and not on any keyword search or filters.
+## Why I built this
 
-## Live Demo
+Most rate limiter tutorials show you one algorithm and stop. I wanted to actually understand the tradeoffs between the common approaches, so I implemented all three of the algorithms you'll usually see discussed in system design interviews (Fixed Window, Sliding Window Log, and Token Bucket), backed by the same Redis instance, so I could compare them side by side instead of just reading about the differences.
 
-https://pacific-expression-production-2a5a.up.railway.app
+The harder part wasn't the algorithms themselves — it was making them safe under concurrency. If two requests hit Redis at the same time, naive code (read counter, check it, increment it) has a race condition: both requests can read the same value before either writes back, and the limit silently breaks. I used Redis Lua scripts to make each check-and-update operation atomic, which was new to me going in and turned out to be the most useful thing I learned from this project.
 
----
+## What's actually in here
 
-## Team 4
-
-| Name                     | ASU ID     | GitHub Username |
-|--------------------------|------------|-----------------|
-| Aarya Bhatt              | 1235522719 | AaryaBhatt9      |
-| Dhvey Patel              | 1235668761 | Dhvey0201        |
-| Sujan Uppalli Jayadevappa| 1234540166 | sujanu           |
-| Tejas Shah               | 1235403730 | Hero4440         |
-
-
----
-
-## Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Frontend | Next.js 16 + Tailwind CSS |
-| Backend | FastAPI (Python 3.11) |
-| Database | PostgreSQL 15 |
-| Vector Store | ChromaDB |
-| Embeddings | sentence-transformers (all-MiniLM-L6-v2) |
-| Authentication | JWT (python-jose + passlib) |
-| Deployment | Docker Compose |
-
----
-
-## Setup Instructions
-
-### Prerequisites
-
-- Python 3.11+
-- Node.js 18+
-- Docker
-- Git
-
----
-
-## Run in Local
-Steps to follow: 
-
-```bash
-git clone https://github.com/AaryaBhatt9/SER594-Team4-SkillSync.git
-cd SER594-Team4-SkillSync
-cp .env.example .env
-docker compose up --build -d
-docker compose exec backend python -m scripts.ingest_profiles
+```
+app/
+  algorithms/
+    fixed_window.py        Counter per time bucket, resets on expiry
+    sliding_window_log.py  Sorted set of timestamps, no boundary burst
+    token_bucket.py        Lazy refill, allows controlled bursting
+  middleware/
+    rate_limit.py           Auto rate-limits every request via Token Bucket
+  main.py                  FastAPI routes for all three algorithms
+  redis_client.py          Shared async Redis connection
+  dashboard.html           Live dashboard to watch the algorithms in action
+tests/
+  test_fixed_window.py
+  test_sliding_window_log.py
+  test_token_bucket.py
+  test_middleware.py
 ```
 
-After that, here's where everything lives:
-- Frontend → http://localhost:3000
-- Backend API → http://localhost:8000
-- Swagger Docs → http://localhost:8000/docs
-- PostgreSQL → localhost:5432
-- ChromaDB → localhost:8001
+## The three algorithms, briefly
 
----
+**Fixed Window Counter** — divides time into fixed buckets (e.g. every 60s) and counts requests per bucket. Simple and O(1) space, but it has a known flaw: a client can send double the limit by timing requests around a window boundary (e.g. 10 requests at second 59, 10 more at second 61 — 20 requests in 2 seconds against a "10 per minute" limit).
 
-## Running Without Docker
+**Sliding Window Log** — fixes the boundary problem by storing the actual timestamp of every request in a Redis sorted set, then counting only the ones within the last N seconds on every check. This is correct, but it costs O(N) space since you're storing one entry per request instead of one counter.
 
-Alternatively, if you prefer not to use Docker or would like to run modules independently, then the following should do the trick:
+**Token Bucket** — the algorithm most production systems actually use (this is roughly how Stripe and AWS API Gateway do it). Each client has a bucket of tokens that refills over time; each request spends one token. This allows a client to burst if they've been idle, while still capping their sustained rate. I implemented "lazy refill" here, meaning there's no background job topping up tokens — instead, the Lua script calculates how many tokens should have accumulated since the last request based on elapsed time, right when the next request comes in.
 
-### Backend
+## Why Lua scripts
+
+This was the main technical challenge. Without atomicity, a sequence like:
+
+```
+1. Read current count from Redis
+2. Check if count < limit
+3. Increment count
+4. Write back to Redis
+```
+
+has a race condition between steps 1-4 if two requests arrive close together — both can read the same starting value and both get approved, even if doing so exceeds the limit. Redis Lua scripts run as a single atomic operation on the Redis server itself, so the whole check-and-update sequence either fully completes or doesn't run at all, with nothing else able to interleave. Each algorithm here has its own Lua script handling this.
+
+## Running it
+
+You'll need Docker (for Redis) and Python 3.9+.
 
 ```bash
-cd backend
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
+# start redis
+docker-compose up -d
+
+# set up the environment
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/skillsync
-export SECRET_KEY=<any-your-secret-key-for-jwt>
-
-psql -U postgres -d skillsync -f migrations/001_initial_schema.sql
-psql -U postgres -d skillsync -f migrations/002_recommendation_history.sql
-python -m scripts.ingest_profiles
+# run the server
 uvicorn app.main:app --reload --port 8000
 ```
 
-### Frontend
+Then visit `http://localhost:8000/dashboard` to see all three algorithms running live against the same Redis instance — you can fire requests, burst past the limit, and (for Token Bucket specifically) watch the tokens refill over time.
+
+API docs are at `http://localhost:8000/docs`.
+
+## Running the tests
 
 ```bash
-cd frontend
-npm install
-npm run dev
-```
-
-Frontend runs at http://localhost:3000.
-
----
-
-## Environment Variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `DATABASE_URL` | PostgreSQL connection string | `postgresql://skillsync:skillsync@localhost:5432/skillsync` |
-| `SECRET_KEY` | JWT signing secret | `super-secret-dev-key` |
-| `ALGORITHM` | JWT algorithm | `HS256` |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Token expiry in minutes | `60` |
-| `CHROMA_MODE` | `local` for embedded persistent Chroma, `http` for external Chroma | `http` |
-| `CHROMA_HOST` | ChromaDB host | `localhost` |
-| `CHROMA_PORT` | ChromaDB port | `8001` |
-| `CHROMA_PERSIST_DIR` | Local Chroma storage path when `CHROMA_MODE=local` | `./chroma_data` |
-| `NEXT_PUBLIC_API_URL` | Backend URL for frontend | `http://localhost:8000` |
-| `NEXT_PUBLIC_API_BASE_URL` | Backend URL for frontend | `http://localhost:8000` |
-| `CORS_ORIGINS` | Comma-separated allowed frontend origins | `http://localhost:3000` |
-
----
-
-## Authentication
-
-### Create an account
-
-```bash
-curl -X POST http://localhost:8000/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"name": "User One", "email": "user1@example.com", "password": "password123"}'
-```
-
-```json
-{"id": 1, "name": "User One", "email": "user1@example.com"}
-```
-
-### Log in
-
-```bash
-curl -X POST http://localhost:8000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email": "user1@example.com", "password": "password123"}'
-```
-
-```json
-{"access_token": "eyJ...", "token_type": "bearer"}
-```
-
-### Hit a protected route
-
-```bash
-curl http://localhost:8000/auth/me \
-  -H "Authorization: Bearer <your_token>"
-```
-
----
-
-## Technique #1 For Artificial Intelligence (AI) – Semantic Matching Through ChromaDB
-
-And this is where the magic happens. Here is how:
-
-### First step: Load seed profiles. 
-
-Seed profiles are ready for you to use inside `app/data/seed_profiles.json`. In total, there are 10 seed profiles. No need for user accounts just yet. Run this script below to load them:
-
-**Then try a search:**
-
-```bash
-curl -X POST http://localhost:8000/match/search \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <your_token>" \
-  -d '{
-    "skills": ["Python", "FastAPI"],
-    "goals": ["build AI projects"],
-    "availability": "weekends",
-    "skill_level": "intermediate",
-    "top_k": 3
-  }'
-```
-
-```json
-{
-  "matches": [
-    {
-      "user_id": "user_1",
-      "score": 0.1745,
-      "explanation": "Common interests/skills: availability, build, goals, intermediate, level"
-    },
-  ]
-}
-```
-
-The `score` is cosine similarity — 0.91 means the profiles are very closely aligned. Anything above 0.75 is generally a solid match.
-
----
-## Technique #2 For Artificial Intelligence (AI) – Multi-Agent Recommendation Pipeline
-
-Beyond semantic embeddings, SkillSync uses a multi-agent pipeline to score and rank candidates. The pipeline is orchestrated in `backend/app/services/recommendation_pipeline.py` and consists of 5 agents:
-
-1. **Profile Parser** (`agents/profile_parser.py`) — Normalizes the user's raw input (skills, goals, availability, skill level) into a clean, searchable profile.
-2. **Candidate Retriever** (`agents/candidate_retriever.py`) — Queries ChromaDB with the parsed profile's embedding to retrieve the top-K semantically similar candidates.
-3. **Skill Compatibility** (`agents/skill_compatibility.py`) — Computes Jaccard similarity between the user's skill set and each candidate's skill set, producing a score and reasoning.
-4. **Goal Alignment** (`agents/goal_alignment.py`) — Same Jaccard approach but on goals, scoring how well each candidate's goals align with the user's.
-5. **Recommendation Ranker** (`agents/recommendation_ranker.py`) — Combines skill (50%), goal (30%), and availability (20%) scores into a final compatibility score, ranks all candidates, and flags risk factors.
-
-Each agent operates independently with a single responsibility, making the system easy to test and extend. For a deeper discussion of why we chose this architecture, see [`docs/DESIGN.md`](docs/DESIGN.md).
-
-### Evaluation
-
-We evaluated the pipeline's recommendation relevance (Precision@K) against a random baseline, and measured response latency. Full results are in [`eval/evaluation_report.md`](eval/evaluation_report.md), and the evaluation script can be run with:
-
-```bash
-python eval/run_evaluation.py
-```
-
----
-
-## Deployment
-
-The system is deployed via Docker Compose. To run the full stack:
-
-```bash
-docker compose up --build -d
-```
-
-To reset the database (required if schema changes):
-
-```bash
-docker compose down -v
-docker compose up --build -d
-docker compose exec backend python -m scripts.ingest_profiles
-```
-
----
-
-## Tests
-
-```bash
-cd backend
-pip install pytest httpx
 pytest tests/ -v
 ```
 
-## Architecture
+22 tests covering correctness (e.g. requests at the limit are allowed, one over is rejected), isolation between clients, and one test per algorithm specifically designed to expose its known weak point — for example, `test_no_boundary_burst` proves Sliding Window doesn't have the Fixed Window boundary problem.
 
-See the architecture diagram: `docs/architecture-diagram.pdf`.
-It's an oversimplification of the following architecture:
-Next.js interacts with FastAPI through REST,
-FastAPI saves user information in Postgres and embeddings in ChromaDB,
-When searching, we generate embeddings and run similarity search in vector store.
-we have an layer with JWT tokens on the backend side.
+## What I'd do differently / next steps
+
+- The reset endpoint uses Redis's `KEYS` command, which is fine for a project like this but would be a problem at scale (it scans the whole keyspace). A production version should use `SCAN` with a cursor instead.
+- Right now the middleware identifies clients by IP address. A more realistic version would support API keys or user IDs, since IP-based limiting breaks down behind NAT (many users sharing one IP) or for legitimate multi-server clients.
+- I'd like to add a load test (Locust) to generate real concurrent traffic and produce actual latency numbers under load, rather than just unit tests against a single Redis instance.
+
+## Tech stack
+
+Python 3.9, FastAPI, Redis 7.2 (via Docker), Lua, pytest + pytest-asyncio
+
+---
+
+Built by Sujan Uppalli Jayadevappa — MS Software Engineering, Arizona State University
