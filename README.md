@@ -1,74 +1,132 @@
-# Distributed Rate Limiter
+# Clickstream Lambda Pipeline
 
-A distributed rate limiter built with FastAPI and Redis, implementing three different rate limiting algorithms from scratch. I built this as a portfolio project while studying for my MS in Software Engineering at Arizona State University, mainly to get hands-on practice with distributed systems concepts that come up a lot in backend interviews: shared state across servers, race conditions, and atomic operations.
+A streaming + batch data pipeline implementing Lambda Architecture: the same e-commerce clickstream events flow through both a real-time speed layer and a scheduled batch layer, landing in the same store so their outputs can be reconciled against each other.
 
-## Why I built this
+## Why Lambda Architecture
 
-Most rate limiter tutorials show you one algorithm and stop. I wanted to actually understand the tradeoffs between the common approaches, so I implemented all three of the algorithms you'll usually see discussed in system design interviews (Fixed Window, Sliding Window Log, and Token Bucket), backed by the same Redis instance, so I could compare them side by side instead of just reading about the differences.
+A pure streaming pipeline is fast but can be wrong — events that arrive late (a mobile client buffering offline, then reconnecting) get counted in whatever time window they *arrive* in, not the window they actually *happened* in. A pure batch pipeline is correct but slow — you wait for a full data dump before computing anything.
 
-The harder part wasn't the algorithms themselves — it was making them safe under concurrency. If two requests hit Redis at the same time, naive code (read counter, check it, increment it) has a race condition: both requests can read the same value before either writes back, and the limit silently breaks. I used Redis Lua scripts to make each check-and-update operation atomic, which was new to me going in and turned out to be the most useful thing I learned from this project.
+Lambda architecture runs both: a speed layer for low-latency approximate results, and a batch layer that periodically reprocesses everything from the permanent raw log to produce the correct numbers. This project deliberately simulates late-arriving events so the discrepancy between the two layers — and the correction — is visible and explainable, not theoretical.
 
-## What's actually in here
+## Project phases
+
+| Phase | What | Status |
+|-------|------|--------|
+| 1 | Event producer + Kafka + raw event storage | ✅ |
+| 2 | Speed layer — windowed aggregation consumer | ✅ |
+| 3 | Batch layer — scheduled reprocessing job | ✅ this phase |
+| 4 | Reconciliation — compare and correct speed vs batch | 🔜 next |
+
+## Architecture (Phase 1 + 2 + 3)
 
 ```
-app/
-  algorithms/
-    fixed_window.py        Counter per time bucket, resets on expiry
-    sliding_window_log.py  Sorted set of timestamps, no boundary burst
-    token_bucket.py        Lazy refill, allows controlled bursting
-  middleware/
-    rate_limit.py           Auto rate-limits every request via Token Bucket
-  main.py                  FastAPI routes for all three algorithms
-  redis_client.py          Shared async Redis connection
-  dashboard.html           Live dashboard to watch the algorithms in action
+producer/event_generator.py
+        │  publishes ClickstreamEvent (some deliberately late)
+        ▼
+   Kafka topic: clickstream-events
+        │
+        ├──────────────────────────────────────────┐
+        ▼                                          ▼
+storage/raw_event_writer.py            speed_layer/aggregator.py
+(group: raw-storage-writer)            (group: speed-layer-aggregator)
+        │  writes every event,                 │  counts events per
+        │  unaggregated, idempotently           │  minute-window, live,
+        ▼                                       │  with a 30s grace period
+   Postgres: raw_events                         ▼
+   (permanent, complete log —          Postgres: speed_counts
+    nothing is ever dropped)           (fast, approximately correct;
+        │                              late_events_dropped tracks misses)
+        │
+        ▼
+batch_layer/batch_job.py
+   (run on a schedule, not continuously — reads ALL of raw_events,
+    groups by TRUE event_time, no grace period needed)
+        │
+        ▼
+   Postgres: batch_counts
+   (slow, but always correct — includes every late event in its true window)
+```
+
+Both consumers (raw_event_writer and aggregator) read the SAME Kafka topic independently — different consumer groups mean Kafka delivers a full copy of every event to each. The batch job doesn't touch Kafka at all; it only reads from the permanent `raw_events` table, which is exactly why it can be correct without racing against time.
+
+## Project structure
+
+```
+producer/
+  schemas.py           ClickstreamEvent definition (event_time vs ingestion_time)
+  event_generator.py   Simulates realistic traffic, including late arrivals
+storage/
+  db.py                Postgres connection + schema (raw_events, speed_counts, batch_counts)
+  raw_event_writer.py  Kafka consumer → Postgres (idempotent, dumb on purpose)
+speed_layer/
+  aggregator.py        Kafka consumer → windowed counts, with grace period
+batch_layer/
+  batch_job.py         Scheduled SQL aggregation over raw_events → batch_counts
 tests/
-  test_fixed_window.py
-  test_sliding_window_log.py
-  test_token_bucket.py
-  test_middleware.py
+  test_event_generator.py
+  test_aggregator.py
+  test_batch_job.py
 ```
 
-## The three algorithms, briefly
+## The key design decision: event_time vs ingestion_time
 
-**Fixed Window Counter** — divides time into fixed buckets (e.g. every 60s) and counts requests per bucket. Simple and O(1) space, but it has a known flaw: a client can send double the limit by timing requests around a window boundary (e.g. 10 requests at second 59, 10 more at second 61 — 20 requests in 2 seconds against a "10 per minute" limit).
+Every event has two timestamps:
+- **event_time** — when it actually happened, from the client's perspective
+- **ingestion_time** — when our system received it
 
-**Sliding Window Log** — fixes the boundary problem by storing the actual timestamp of every request in a Redis sorted set, then counting only the ones within the last N seconds on every check. This is correct, but it costs O(N) space since you're storing one entry per request instead of one counter.
-
-**Token Bucket** — the algorithm most production systems actually use (this is roughly how Stripe and AWS API Gateway do it). Each client has a bucket of tokens that refills over time; each request spends one token. This allows a client to burst if they've been idle, while still capping their sustained rate. I implemented "lazy refill" here, meaning there's no background job topping up tokens — instead, the Lua script calculates how many tokens should have accumulated since the last request based on elapsed time, right when the next request comes in.
-
-## Why Lua scripts
-
-This was the main technical challenge. Without atomicity, a sequence like:
-
-```
-1. Read current count from Redis
-2. Check if count < limit
-3. Increment count
-4. Write back to Redis
-```
-
-has a race condition between steps 1-4 if two requests arrive close together — both can read the same starting value and both get approved, even if doing so exceeds the limit. Redis Lua scripts run as a single atomic operation on the Redis server itself, so the whole check-and-update sequence either fully completes or doesn't run at all, with nothing else able to interleave. Each algorithm here has its own Lua script handling this.
+For most events these are the same moment. But the producer deliberately makes a small percentage of events "late": event_time is set in the past, while ingestion_time is now. This single mechanic is what creates the entire reason this project exists — a speed layer processing by arrival order will misplace late events into the wrong time window, while a batch layer re-reading by event_time later will get it right.
 
 ## Running it
 
-You'll need Docker (for Redis) and Python 3.9+.
-
 ```bash
-# start redis
+# start kafka, zookeeper, postgres
 docker-compose up -d
 
-# set up the environment
+# environment
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# run the server
-uvicorn app.main:app --reload --port 8000
+# initialize the database schema
+python -m storage.db
+
+# terminal 1: start the raw event writer (consumer)
+python -m storage.raw_event_writer
+
+# terminal 2: start the speed layer (independent consumer, different group)
+python -m speed_layer.aggregator
+
+# terminal 3: start the producer
+python -m producer.event_generator
 ```
 
-Then visit `http://localhost:8000/dashboard` to see all three algorithms running live against the same Redis instance — you can fire requests, burst past the limit, and (for Token Bucket specifically) watch the tokens refill over time.
+Watch all three terminals. After a couple of minutes (windows finalize after window + grace period = 90s), check the speed layer's output:
 
-API docs are at `http://localhost:8000/docs`.
+```bash
+docker exec -it pipeline-postgres psql -U pipeline -d clickstream -c "SELECT user_id, event_type, window_start, event_count, late_events_dropped FROM speed_counts ORDER BY window_start DESC LIMIT 10;"
+```
+
+Rows with `late_events_dropped > 0` are windows where a late-arriving event showed up after that window had already been finalized — proof the speed layer is fast but not perfectly accurate.
+
+Now run the batch layer to compute the TRUE counts for the same period:
+
+```bash
+python -m batch_layer.batch_job
+```
+
+This runs once and exits (it's meant to be scheduled, not left running). Compare the two outputs directly:
+
+```bash
+docker exec -it pipeline-postgres psql -U pipeline -d clickstream -c "
+SELECT s.user_id, s.event_type, s.window_start, s.event_count AS speed_count, b.event_count AS batch_count, s.late_events_dropped
+FROM speed_counts s
+JOIN batch_counts b ON s.user_id = b.user_id AND s.event_type = b.event_type AND s.window_start = b.window_start
+WHERE s.event_count != b.event_count OR s.late_events_dropped > 0
+ORDER BY s.window_start DESC LIMIT 10;
+"
+```
+
+Any row here is a window where the speed layer's fast answer differs from the batch layer's correct answer — direct, queryable proof of why Lambda architecture exists.
 
 ## Running the tests
 
@@ -76,18 +134,14 @@ API docs are at `http://localhost:8000/docs`.
 pytest tests/ -v
 ```
 
-22 tests covering correctness (e.g. requests at the limit are allowed, one over is rejected), isolation between clients, and one test per algorithm specifically designed to expose its known weak point — for example, `test_no_boundary_burst` proves Sliding Window doesn't have the Fixed Window boundary problem.
+`test_event_generator.py` and `test_aggregator.py` are pure-Python unit tests — no infrastructure required. `test_batch_job.py` is an integration test that needs Postgres running (`docker-compose up -d` first), since the batch job's entire purpose is running real SQL against `raw_events`.
 
-## What I'd do differently / next steps
-
-- The reset endpoint uses Redis's `KEYS` command, which is fine for a project like this but would be a problem at scale (it scans the whole keyspace). A production version should use `SCAN` with a cursor instead.
-- Right now the middleware identifies clients by IP address. A more realistic version would support API keys or user IDs, since IP-based limiting breaks down behind NAT (many users sharing one IP) or for legitimate multi-server clients.
-- I'd like to add a load test (Locust) to generate real concurrent traffic and produce actual latency numbers under load, rather than just unit tests against a single Redis instance.
+Key tests:
+- `test_late_events_have_event_time_before_ingestion_time` — proves the late-arrival mechanism works (Phase 1)
+- `test_event_after_finalization_is_dropped_not_counted` — proves the speed layer's defining limitation is real and observable (Phase 2)
+- `test_batch_job_correctly_places_late_arriving_event` — proves the batch layer succeeds exactly where the speed layer is designed to fail, by grouping on event_time instead of arrival order (Phase 3)
+- `test_batch_job_is_idempotent_when_run_twice` — proves re-running the "reprocess everything" batch job doesn't double-count, which is what makes that simple approach safe to actually schedule
 
 ## Tech stack
 
-Python 3.9, FastAPI, Redis 7.2 (via Docker), Lua, pytest + pytest-asyncio
-
----
-
-Built by Sujan Uppalli Jayadevappa — MS Software Engineering, Arizona State University
+Python 3.9+, Kafka (Confluent images via Docker), Postgres 16, confluent-kafka, psycopg2, Pydantic, Faker
